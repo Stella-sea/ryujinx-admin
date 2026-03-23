@@ -26,7 +26,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Security.Principal;
 using System.Threading.Tasks;
 
 namespace Ryujinx.Ava
@@ -68,15 +67,6 @@ namespace Ryujinx.Ava
                     return 0;
                 }
 
-                // The names of everything here makes no sense for what this actually checks for. Thanks, Microsoft.
-                // If you can't tell by the error string,
-                // this actually checks if the current process was run with "Run as Administrator"
-                // ...but this reads like it checks if the current is in/has the Windows admin role? lol
-                if (new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
-                {
-                    _ = Win32NativeInterop.MessageBoxA(nint.Zero, "Ryujinx is not intended to be run as administrator.", $"Ryujinx {Version}", MbIconwarning);
-                    return 0;
-                }
             }
 
             bool noGuiArg = ConsumeCommandLineArgument(ref args, "--no-gui") || ConsumeCommandLineArgument(ref args, "nogui");

@@ -1,0 +1,77 @@
+name: Build Windows Artifact
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  POWERSHELL_TELEMETRY_OPTOUT: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Get git short hash
+        id: git_short_hash
+        shell: bash
+        run: echo "result=$(git rev-parse --short \"${{ github.sha }}\")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish Windows build
+        run: |
+          dotnet publish "src/Ryujinx/Ryujinx.csproj" `
+            -c Release `
+            -r win-x64 `
+            --self-contained false `
+            -o "publish/win-x64" `
+            -p:DebugType=None `
+            -p:DebugSymbols=false `
+            -p:TrimmerSingleWarn=true `
+            -p:SuppressTrimAnalysisWarnings=true
+
+      - name: Remove foreign macOS shim
+        run: |
+          if (Test-Path "publish/win-x64/libarmeilleure-jitsupport.dylib") {
+            Remove-Item "publish/win-x64/libarmeilleure-jitsupport.dylib"
+          }
+
+      - name: Pack artifact
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "publish/win-x64/*" -DestinationPath "publish/ryujinx-win-x64-${{ steps.git_short_hash.outputs.result }}.zip" -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ryujinx-win-x64-${{ steps.git_short_hash.outputs.result }}
+          path: publish/ryujinx-win-x64-${{ steps.git_short_hash.outputs.result }}.zip
+
+      - name: Publish rolling GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rolling-master
+          name: Rolling master
+          body: |
+            Automatically built from `${{ github.sha }}`.
+
+            This mirror keeps a local admin-run startup patch and otherwise tracks upstream master.
+          files: publish/ryujinx-win-x64-${{ steps.git_short_hash.outputs.result }}.zip
+          prerelease: true
+          make_latest: false
