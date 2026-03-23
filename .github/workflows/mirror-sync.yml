@@ -21,184 +21,28 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Preserve local workflows
+        run: |
+          mkdir -p /tmp/ryujinx-mirror-workflows
+          cp .github/workflows/mirror-sync.yml /tmp/ryujinx-mirror-workflows/mirror-sync.yml
+          cp .github/workflows/windows-build.yml /tmp/ryujinx-mirror-workflows/windows-build.yml
+
       - name: Configure upstream remote
         run: |
           git remote remove upstream 2>/dev/null || true
           git remote add upstream https://git.ryujinx.app/ryubing/ryujinx.git
           git fetch upstream master --prune --tags
 
-      - name: Sync master from upstream
+      - name: Sync canary from upstream master
         run: |
-          git checkout master
+          git checkout -B canary
           git reset --hard upstream/master
 
-      - name: Restore mirror workflows
+      - name: Restore local workflows
         run: |
           mkdir -p .github/workflows
-          cat <<'EOF' > .github/workflows/mirror-sync.yml
-          name: Mirror Upstream
-
-          on:
-            workflow_dispatch:
-            schedule:
-              - cron: '23 * * * *'
-
-          permissions:
-            contents: write
-
-          concurrency:
-            group: mirror-sync
-            cancel-in-progress: true
-
-          jobs:
-            sync:
-              runs-on: ubuntu-latest
-              steps:
-                - name: Check out mirror repository
-                  uses: actions/checkout@v4
-                  with:
-                    fetch-depth: 0
-
-                - name: Configure upstream remote
-                  run: |
-                    git remote remove upstream 2>/dev/null || true
-                    git remote add upstream https://git.ryujinx.app/ryubing/ryujinx.git
-                    git fetch upstream master --prune --tags
-
-                - name: Sync master from upstream
-                  run: |
-                    git checkout master
-                    git reset --hard upstream/master
-
-                - name: Restore mirror workflows
-                  run: |
-                    mkdir -p .github/workflows
-                    cat <<'INNER1' > .github/workflows/mirror-sync.yml
-                    MIRROR_SYNC_CONTENT
-                    INNER1
-                    cat <<'INNER2' > .github/workflows/windows-build.yml
-                    WINDOWS_BUILD_CONTENT
-                    INNER2
-                    rm -f .github/workflows/build.yml .github/workflows/canary.yml .github/workflows/checks.yml .github/workflows/nightly_pr_comment.yml .github/workflows/pr_triage.yml .github/workflows/release.yml
-
-                - name: Re-apply local admin-run patch
-                  run: |
-                    python <<'PY'
-                    from pathlib import Path
-
-                    path = Path('src/Ryujinx/Program.cs')
-                    text = path.read_text(encoding='utf-8')
-                    text = text.replace('using System.Security.Principal;\n', '')
-
-                    block = """                // The names of everything here makes no sense for what this actually checks for. Thanks, Microsoft.\n                // If you can't tell by the error string,\n                // this actually checks if the current process was run with \"Run as Administrator\"\n                // ...but this reads like it checks if the current is in/has the Windows admin role? lol\n                if (new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))\n                {\n                    _ = Win32NativeInterop.MessageBoxA(nint.Zero, \"Ryujinx is not intended to be run as administrator.\", $\"Ryujinx {Version}\", MbIconwarning);\n                    return 0;\n                }\n"""
-
-                    text = text.replace(block, '')
-                    path.write_text(text, encoding='utf-8')
-                    PY
-
-                - name: Commit mirror updates when needed
-                  run: |
-                    if git diff --quiet; then
-                      echo "No changes to commit"
-                      exit 0
-                    fi
-
-                    git config user.name "github-actions[bot]"
-                    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-                    git add .github/workflows/mirror-sync.yml .github/workflows/windows-build.yml src/Ryujinx/Program.cs
-                    git rm -f .github/workflows/build.yml .github/workflows/canary.yml .github/workflows/checks.yml .github/workflows/nightly_pr_comment.yml .github/workflows/pr_triage.yml .github/workflows/release.yml 2>/dev/null || true
-                    git commit -m "sync upstream and keep admin-run patch"
-                    git push origin master
-          EOF
-          cat <<'EOF' > .github/workflows/windows-build.yml
-          name: Build Windows Artifact
-
-          on:
-            workflow_dispatch:
-            push:
-              branches:
-                - master
-
-          permissions:
-            contents: write
-
-          concurrency:
-            group: windows-build-${{ github.ref }}
-            cancel-in-progress: true
-
-          env:
-            POWERSHELL_TELEMETRY_OPTOUT: 1
-            DOTNET_CLI_TELEMETRY_OPTOUT: 1
-
-          jobs:
-            build:
-              runs-on: windows-latest
-              steps:
-                - name: Check out repository
-                  uses: actions/checkout@v4
-
-                - name: Set up .NET
-                  uses: actions/setup-dotnet@v4
-                  with:
-                    global-json-file: global.json
-
-                - name: Get git short hash
-                  id: git_short_hash
-                  shell: bash
-                  run: echo "result=$(git rev-parse --short \"${{ github.sha }}\")" >> "$GITHUB_OUTPUT"
-
-                - name: Publish Windows build
-                  run: |
-                    dotnet publish "src/Ryujinx/Ryujinx.csproj" `
-                      -c Release `
-                      -r win-x64 `
-                      --self-contained false `
-                      -o "publish/win-x64" `
-                      -p:DebugType=None `
-                      -p:DebugSymbols=false `
-                      -p:TrimmerSingleWarn=true `
-                      -p:SuppressTrimAnalysisWarnings=true
-
-                - name: Remove foreign macOS shim
-                  run: |
-                    if (Test-Path "publish/win-x64/libarmeilleure-jitsupport.dylib") {
-                      Remove-Item "publish/win-x64/libarmeilleure-jitsupport.dylib"
-                    }
-
-                - name: Pack artifact
-                  shell: pwsh
-                  run: |
-                    Compress-Archive -Path "publish/win-x64/*" -DestinationPath "publish/ryujinx-win-x64-${{ steps.git_short_hash.outputs.result }}.zip" -Force
-
-                - name: Upload workflow artifact
-                  uses: actions/upload-artifact@v4
-                  with:
-                    name: ryujinx-win-x64-${{ steps.git_short_hash.outputs.result }}
-                    path: publish/ryujinx-win-x64-${{ steps.git_short_hash.outputs.result }}.zip
-
-                - name: Publish rolling GitHub release
-                  uses: softprops/action-gh-release@v2
-                  with:
-                    tag_name: rolling-master
-                    name: Rolling master
-                    body: |
-                      Automatically built from `${{ github.sha }}`.
-
-                      This mirror keeps a local admin-run startup patch and otherwise tracks upstream master.
-                    files: publish/ryujinx-win-x64-${{ steps.git_short_hash.outputs.result }}.zip
-                    prerelease: true
-                    make_latest: false
-          EOF
-          python <<'PY'
-          from pathlib import Path
-
-          mirror = Path('.github/workflows/mirror-sync.yml')
-          windows = Path('.github/workflows/windows-build.yml').read_text(encoding='utf-8').rstrip()
-          text = mirror.read_text(encoding='utf-8')
-          text = text.replace('WINDOWS_BUILD_CONTENT', windows)
-          text = text.replace('MIRROR_SYNC_CONTENT', text.rstrip())
-          mirror.write_text(text, encoding='utf-8')
-          PY
+          cp /tmp/ryujinx-mirror-workflows/mirror-sync.yml .github/workflows/mirror-sync.yml
+          cp /tmp/ryujinx-mirror-workflows/windows-build.yml .github/workflows/windows-build.yml
           rm -f .github/workflows/build.yml .github/workflows/canary.yml .github/workflows/checks.yml .github/workflows/nightly_pr_comment.yml .github/workflows/pr_triage.yml .github/workflows/release.yml
 
       - name: Re-apply local admin-run patch
@@ -228,4 +72,4 @@ jobs:
           git add .github/workflows/mirror-sync.yml .github/workflows/windows-build.yml src/Ryujinx/Program.cs
           git rm -f .github/workflows/build.yml .github/workflows/canary.yml .github/workflows/checks.yml .github/workflows/nightly_pr_comment.yml .github/workflows/pr_triage.yml .github/workflows/release.yml 2>/dev/null || true
           git commit -m "sync upstream and keep admin-run patch"
-          git push origin master
+          git push --force-with-lease origin HEAD:canary
