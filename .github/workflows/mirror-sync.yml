@@ -1,0 +1,168 @@
+name: Mirror Upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 * * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out mirror repository
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          git init .
+          git remote add origin "https://github.com/${REPOSITORY}.git"
+
+          for attempt in 1 2 3 4 5; do
+            if git fetch --prune origin "+refs/heads/${REF_NAME}:refs/remotes/origin/${REF_NAME}"; then
+              break
+            fi
+
+            if [ "$attempt" = "5" ]; then
+              echo "Failed to fetch ${REPOSITORY}@${REF_NAME} after ${attempt} attempts"
+              exit 1
+            fi
+
+            sleep $((attempt * 10))
+          done
+
+          git checkout -B "${REF_NAME}" "refs/remotes/origin/${REF_NAME}"
+
+      - name: Preserve local workflows
+        run: |
+          mkdir -p /tmp/ryujinx-mirror-workflows
+          cp .github/workflows/mirror-sync.yml /tmp/ryujinx-mirror-workflows/mirror-sync.yml
+          cp .github/workflows/windows-build.yml /tmp/ryujinx-mirror-workflows/windows-build.yml
+
+      - name: Configure upstream remote
+        id: upstream
+        run: |
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://git.ryujinx.app/ryubing/ryujinx.git
+
+          for attempt in 1 2 3 4 5 6; do
+            if timeout 120s git fetch upstream master --prune --tags; then
+              echo "fetched=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if [ "$attempt" = "6" ]; then
+              echo "::warning::Upstream repository was unavailable after ${attempt} attempts; leaving canary unchanged for this run"
+              echo "fetched=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            sleep $((attempt * 20))
+          done
+
+      - name: Sync canary from upstream master
+        if: steps.upstream.outputs.fetched == 'true'
+        run: |
+          git checkout -B canary
+          git reset --hard upstream/master
+
+      - name: Restore local workflows
+        if: steps.upstream.outputs.fetched == 'true'
+        run: |
+          mkdir -p .github/workflows
+          cp /tmp/ryujinx-mirror-workflows/mirror-sync.yml .github/workflows/mirror-sync.yml
+          cp /tmp/ryujinx-mirror-workflows/windows-build.yml .github/workflows/windows-build.yml
+          rm -f .github/workflows/build.yml .github/workflows/canary.yml .github/workflows/checks.yml .github/workflows/nightly_pr_comment.yml .github/workflows/pr_triage.yml .github/workflows/release.yml
+
+      - name: Re-apply local admin-run patch
+        if: steps.upstream.outputs.fetched == 'true'
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          path = Path('src/Ryujinx/Program.cs')
+          text = path.read_text(encoding='utf-8')
+          text = text.replace('using System.Security.Principal;\n', '')
+
+          comment = '                // The names of everything here makes no sense for what this actually checks for. Thanks, Microsoft.\n'
+          guard = '                if (new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))'
+          start = text.find(comment)
+          guard_pos = text.find(guard, start if start != -1 else 0)
+
+          if start != -1 and guard_pos != -1:
+              brace_pos = text.find('{', guard_pos)
+              if brace_pos == -1:
+                  raise RuntimeError('Could not find admin-run check opening brace')
+
+              depth = 0
+              end = None
+              for index in range(brace_pos, len(text)):
+                  char = text[index]
+                  if char == '{':
+                      depth += 1
+                  elif char == '}':
+                      depth -= 1
+                      if depth == 0:
+                          end = index + 1
+                          if text[end:end + 2] == '\r\n':
+                              end += 2
+                          elif text[end:end + 1] == '\n':
+                              end += 1
+                          break
+
+              if end is None:
+                  raise RuntimeError('Could not find admin-run check closing brace')
+
+              text = text[:start] + text[end:]
+          else:
+              print('Admin-run check was not found; assuming upstream already removed or changed it.')
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit mirror updates when needed
+        if: steps.upstream.outputs.fetched == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git status --short
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/mirror-sync.yml .github/workflows/windows-build.yml src/Ryujinx/Program.cs
+          git rm -f .github/workflows/build.yml .github/workflows/canary.yml .github/workflows/checks.yml .github/workflows/nightly_pr_comment.yml .github/workflows/pr_triage.yml .github/workflows/release.yml 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "No local mirror patch changes to commit"
+          else
+            git diff --cached --stat
+            git commit -m "sync upstream and keep admin-run patch"
+          fi
+
+          for attempt in 1 2 3 4 5; do
+            if git fetch origin canary; then
+              break
+            fi
+
+            if [ "$attempt" = "5" ]; then
+              echo "Failed to fetch origin canary after ${attempt} attempts"
+              exit 1
+            fi
+
+            sleep $((attempt * 10))
+          done
+
+          remote_sha="$(git rev-parse refs/remotes/origin/canary)"
+
+          if [ "$(git rev-parse HEAD^{tree})" = "$(git rev-parse refs/remotes/origin/canary^{tree})" ]; then
+            echo "Remote canary already has the same tree; nothing to push"
+            exit 0
+          fi
+
+          git remote set-url --push origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force-with-lease=refs/heads/canary:"$remote_sha" origin HEAD:canary
