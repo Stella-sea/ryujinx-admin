@@ -6,6 +6,7 @@ on:
     - cron: '23 * * * *'
 
 permissions:
+  actions: write
   contents: write
 
 concurrency:
@@ -46,34 +47,29 @@ jobs:
           cp .github/workflows/windows-build.yml /tmp/ryujinx-mirror-workflows/windows-build.yml
 
       - name: Configure upstream remote
-        id: upstream
         run: |
           git remote remove upstream 2>/dev/null || true
           git remote add upstream https://git.ryujinx.app/ryubing/ryujinx.git
 
           for attempt in 1 2 3 4 5 6; do
             if timeout 120s git fetch upstream master --prune --tags; then
-              echo "fetched=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
             if [ "$attempt" = "6" ]; then
-              echo "::warning::Upstream repository was unavailable after ${attempt} attempts; leaving canary unchanged for this run"
-              echo "fetched=false" >> "$GITHUB_OUTPUT"
-              exit 0
+              echo "::error::Upstream repository was unavailable after ${attempt} attempts; canary was not changed"
+              exit 1
             fi
 
             sleep $((attempt * 20))
           done
 
       - name: Sync canary from upstream master
-        if: steps.upstream.outputs.fetched == 'true'
         run: |
           git checkout -B canary
           git reset --hard upstream/master
 
       - name: Restore local workflows
-        if: steps.upstream.outputs.fetched == 'true'
         run: |
           mkdir -p .github/workflows
           cp /tmp/ryujinx-mirror-workflows/mirror-sync.yml .github/workflows/mirror-sync.yml
@@ -81,7 +77,6 @@ jobs:
           rm -f .github/workflows/build.yml .github/workflows/canary.yml .github/workflows/checks.yml .github/workflows/nightly_pr_comment.yml .github/workflows/pr_triage.yml .github/workflows/release.yml
 
       - name: Re-apply local admin-run patch
-        if: steps.upstream.outputs.fetched == 'true'
         run: |
           python <<'PY'
           from pathlib import Path
@@ -127,7 +122,7 @@ jobs:
           PY
 
       - name: Commit mirror updates when needed
-        if: steps.upstream.outputs.fetched == 'true'
+        id: commit
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -166,3 +161,13 @@ jobs:
 
           git remote set-url --push origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force-with-lease=refs/heads/canary:"$remote_sha" origin HEAD:canary
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build updated canary
+        if: steps.commit.outputs.source_sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ steps.commit.outputs.source_sha }}
+        run: |
+          gh workflow run windows-build.yml --ref canary -f "source_sha=$SOURCE_SHA"

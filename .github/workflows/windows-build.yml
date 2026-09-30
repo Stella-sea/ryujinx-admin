@@ -2,18 +2,21 @@ name: Build Windows Artifact
 
 on:
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 'canary commit to build (set by mirror sync; leave blank for current canary)'
+        required: false
+        type: string
   push:
     branches:
       - canary
-    paths-ignore:
-      - '.github/workflows/**'
 
 permissions:
   contents: write
 
 concurrency:
-  group: windows-build-${{ github.ref }}
-  cancel-in-progress: true
+  group: rolling-canary-windows
+  cancel-in-progress: false
 
 env:
   POWERSHELL_TELEMETRY_OPTOUT: 1
@@ -23,58 +26,129 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - name: Check out repository
+      - name: Check out canary
         uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha || 'canary' }}
+
+      - name: Identify source commit
+        id: source
+        shell: pwsh
+        env:
+          REQUESTED_SHA: ${{ inputs.source_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sha = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[0-9a-f]{40}$') { throw 'Unable to resolve checked-out commit' }
+          $requested = $env:REQUESTED_SHA
+          if ($requested -and $sha -ne $requested) { throw "Expected $requested but checked out $sha" }
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          "short=$($sha.Substring(0, 12))" >> $env:GITHUB_OUTPUT
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
 
-      - name: Get git short hash
-        id: git_short_hash
-        shell: bash
-        run: echo "result=$(git rev-parse --short \"${{ github.sha }}\")" >> "$GITHUB_OUTPUT"
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-win-x64-${{ hashFiles('**/Directory.Packages.props', '**/nuget.config', 'global.json') }}
+          restore-keys: |
+            nuget-win-x64-
+
+      - name: Restore dependencies with bounded retries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $project = 'src/Ryujinx/Ryujinx.csproj'
+          $args = @('restore', $project, '-r', 'win-x64', '-p:Configuration=Release', '-p:SelfContained=false', '--disable-parallel', '--ignore-failed-sources')
+          $restored = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Write-Host "NuGet restore attempt $attempt of 3"
+            & dotnet @args
+            if ($LASTEXITCODE -eq 0) { $restored = $true; break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (15 * $attempt) }
+          }
+          if (-not $restored) {
+            throw 'NuGet restore failed after 3 attempts. Check the Ryujinx.LibHac package source and the cache; the required alpha version is not on nuget.org.'
+          }
 
       - name: Publish Windows build
+        shell: pwsh
         run: |
-          dotnet publish "src/Ryujinx/Ryujinx.csproj" `
+          $ErrorActionPreference = 'Stop'
+          dotnet publish 'src/Ryujinx/Ryujinx.csproj' `
             -c Release `
             -r win-x64 `
+            --no-restore `
             --self-contained false `
-            -o "publish/win-x64" `
+            -o 'publish/win-x64' `
             -p:DebugType=None `
             -p:DebugSymbols=false `
             -p:PublishTrimmed=false `
             -p:TrimmerSingleWarn=true `
             -p:SuppressTrimAnalysisWarnings=true
+          if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed' }
 
-      - name: Remove foreign macOS shim
-        run: |
-          if (Test-Path "publish/win-x64/libarmeilleure-jitsupport.dylib") {
-            Remove-Item "publish/win-x64/libarmeilleure-jitsupport.dylib"
-          }
-
-      - name: Pack artifact
+      - name: Pack and verify artifact
         shell: pwsh
         run: |
-          Compress-Archive -Path "publish/win-x64/*" -DestinationPath "publish/ryujinx-win-x64-${{ steps.git_short_hash.outputs.result }}.zip" -Force
+          $ErrorActionPreference = 'Stop'
+          $dir = 'publish/win-x64'
+          if (-not (Test-Path "$dir/Ryujinx.exe")) { throw 'Ryujinx.exe missing from publish output' }
+          Remove-Item "$dir/libarmeilleure-jitsupport.dylib" -ErrorAction SilentlyContinue
+          $zip = 'publish/ryujinx-win-x64-${{ steps.source.outputs.short }}.zip'
+          Compress-Archive -Path "$dir/*" -DestinationPath $zip -Force
+          if (-not (Test-Path $zip) -or (Get-Item $zip).Length -eq 0) { throw 'ZIP missing or empty' }
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ryujinx-canary-win-x64-${{ steps.git_short_hash.outputs.result }}
-          path: publish/ryujinx-win-x64-${{ steps.git_short_hash.outputs.result }}.zip
+          name: ryujinx-canary-win-x64-${{ steps.source.outputs.short }}
+          path: publish/ryujinx-win-x64-${{ steps.source.outputs.short }}.zip
+          if-no-files-found: error
 
       - name: Publish rolling GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: rolling-canary
-          name: Rolling canary
-          body: |
-            Automatically built from `${{ github.sha }}`.
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_SHORT: ${{ steps.source.outputs.short }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $branch = gh api "repos/$env:GH_REPO/git/ref/heads/canary" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to read current canary ref' }
+          if ($branch.object.sha -ne $env:SOURCE_SHA) {
+            Write-Host "canary has moved to $($branch.object.sha); skip publishing stale build $env:SOURCE_SHA"
+            exit 0
+          }
 
-            This mirror keeps a local admin-run startup patch and otherwise tracks the latest upstream source branch used for canary-style builds.
-          files: publish/ryujinx-win-x64-${{ steps.git_short_hash.outputs.result }}.zip
-          prerelease: true
-          make_latest: false
+          $tag = 'rolling-canary'
+          $asset = "publish/ryujinx-win-x64-$env:SOURCE_SHORT.zip"
+          $release = gh api "repos/$env:GH_REPO/releases/tags/$tag" --jq .id 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag $asset --target $env:SOURCE_SHA --title 'Rolling canary' --prerelease --notes "Automatically built from $env:SOURCE_SHA. This mirror keeps a local admin-run startup patch."
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to create rolling release' }
+          } else {
+            # Upload first so a failed upload leaves the previous working asset in place.
+            $assets = @(gh api "repos/$env:GH_REPO/releases/$release/assets" | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to list rolling release assets' }
+            $assetName = Split-Path $asset -Leaf
+            if (-not @($assets | Where-Object { $_.name -eq $assetName }).Count) {
+              gh release upload $tag $asset
+              if ($LASTEXITCODE -ne 0) { throw 'Failed to upload new asset' }
+            }
+            gh api "repos/$env:GH_REPO/git/refs/tags/$tag" -X PATCH -f "sha=$env:SOURCE_SHA" -F force=true | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to advance rolling tag' }
+            gh release edit $tag --title 'Rolling canary' --prerelease --notes "Automatically built from $env:SOURCE_SHA. This mirror keeps a local admin-run startup patch."
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to update rolling release notes' }
+            foreach ($old in $assets) {
+              if ($old.name -ne $assetName) {
+                gh api "repos/$env:GH_REPO/releases/assets/$($old.id)" -X DELETE
+                if ($LASTEXITCODE -ne 0) { throw "Failed to remove old asset $($old.name)" }
+              }
+            }
+          }
