@@ -3,7 +3,7 @@ name: Mirror Upstream
 on:
   workflow_dispatch:
   schedule:
-    - cron: '23 * * * *'
+    - cron: '23 2 * * *'
 
 permissions:
   actions: write
