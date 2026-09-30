@@ -58,12 +58,41 @@ jobs:
           restore-keys: |
             nuget-win-x64-
 
+      - name: Check LibHac package source
+        id: libhac
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cache = Join-Path $HOME '.nuget/packages/ryujinx.libhac/0.21.0-alpha.133/lib/net8.0/LibHac.dll'
+          if (Test-Path $cache -PathType Leaf) {
+            Write-Host 'Ryujinx.LibHac is cached; restore can continue without the upstream source.'
+            "available=true" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $url = 'https://git.ryujinx.app/api/packages/projects/nuget/index.json'
+          for ($attempt = 1; $attempt -le 2; $attempt++) {
+            try {
+              $response = Invoke-WebRequest -Uri $url -TimeoutSec 12
+              if ($response.StatusCode -ne 200) { throw "HTTP $($response.StatusCode)" }
+              "available=true" >> $env:GITHUB_OUTPUT
+              exit 0
+            } catch {
+              Write-Host "Package source probe $attempt/2: $_"
+              if ($attempt -eq 1) { Start-Sleep -Seconds 5 }
+            }
+          }
+          $message = 'Skipped Windows build: git.ryujinx.app is unreachable and Ryujinx.LibHac 0.21.0-alpha.133 is not cached. Existing rolling release is unchanged.'
+          Write-Host "::warning::$message"
+          "### $message" >> $env:GITHUB_STEP_SUMMARY
+          "available=false" >> $env:GITHUB_OUTPUT
+
       - name: Restore dependencies with bounded retries
+        if: steps.libhac.outputs.available == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $project = 'src/Ryujinx/Ryujinx.csproj'
-          $args = @('restore', $project, '-r', 'win-x64', '-p:Configuration=Release', '-p:SelfContained=false', '--disable-parallel', '--ignore-failed-sources')
+          $args = @('restore', $project, '-r', 'win-x64', '-p:Configuration=Release', '-p:SelfContained=false', '--ignore-failed-sources')
           $restored = $false
           for ($attempt = 1; $attempt -le 3; $attempt++) {
             Write-Host "NuGet restore attempt $attempt of 3"
@@ -76,6 +105,7 @@ jobs:
           }
 
       - name: Publish Windows build
+        if: steps.libhac.outputs.available == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -93,6 +123,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed' }
 
       - name: Pack and verify artifact
+        if: steps.libhac.outputs.available == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -104,6 +135,7 @@ jobs:
           if (-not (Test-Path $zip) -or (Get-Item $zip).Length -eq 0) { throw 'ZIP missing or empty' }
 
       - name: Upload workflow artifact
+        if: steps.libhac.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ryujinx-canary-win-x64-${{ steps.source.outputs.short }}
@@ -111,6 +143,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish rolling GitHub release
+        if: steps.libhac.outputs.available == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
