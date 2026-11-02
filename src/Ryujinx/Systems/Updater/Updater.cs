@@ -150,7 +150,7 @@ namespace Ryujinx.Ava.Systems
                 // Forgejo instance is located in Ukraine. Connection times will vary across the world.
                 buildSizeClient.Timeout = TimeSpan.FromSeconds(10);
 
-                HttpResponseMessage message = await buildSizeClient.GetAsync(new Uri(_versionResponse.ArtifactUrl), HttpCompletionOption.ResponseHeadersRead);
+                HttpResponseMessage message = await buildSizeClient.GetAsync(new Uri(downloadUrl), HttpCompletionOption.ResponseHeadersRead);
 
                 _buildSize = message.Content.Headers.ContentRange.Length.Value;
             }
@@ -435,7 +435,7 @@ namespace Ryujinx.Ava.Systems
         
         private static void Extract7ZipFile(string archivePath, string outputDirectoryPath)
         {
-            IArchive archive = ArchiveFactory.OpenArchive(archivePath);
+            using IArchive archive = ArchiveFactory.OpenArchive(archivePath);
             archive.WriteToDirectory(outputDirectoryPath);
         }
 
