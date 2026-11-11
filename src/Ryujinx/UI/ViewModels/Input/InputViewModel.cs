@@ -707,6 +707,12 @@ namespace Ryujinx.Ava.UI.ViewModels.Input
                 return persistedConfig;
             }
 
+            // Dynamic input swapping can temporarily activate the keyboard without changing the main device.
+            if (Devices.Any(device => device.Type == DeviceType.Controller && device.Id == controllerConfig.Id))
+            {
+                return persistedConfig;
+            }
+
             // If runtime has already fallen back to keyboard, reflect that active config in settings
             // instead of showing the stale persisted controller config.
             InputConfig activeConfig = _mainWindow?.ViewModel.AppHost?.NpadManager?.GetPlayerInputConfigByIndex((int)_playerId);
@@ -719,7 +725,6 @@ namespace Ryujinx.Ava.UI.ViewModels.Input
             // device isn't currently connected, fall back to keyboard so the user isn't
             // stuck on "Disabled".
             if (activeConfig == null &&
-                !Devices.Any(device => device.Type == DeviceType.Controller && device.Id == controllerConfig.Id) &&
                 TryCreateKeyboardFallbackConfig(persistedConfig, out StandardKeyboardInputConfig fallbackConfig))
             {
                 return fallbackConfig;
@@ -1437,20 +1442,10 @@ namespace Ryujinx.Ava.UI.ViewModels.Input
         {
             bool duplicateDeviceAssignmentChanged = _allowDuplicateDeviceAssignment.HasValue &&
                 _allowDuplicateDeviceAssignment.Value != GetSavedAllowDuplicateDeviceAssignment();
-            bool configChanged = !ConfigsMatch(GetSelectedDeviceConfig(), GetPersistedComparisonConfig());
+            bool configChanged = !ConfigsMatch(GetSelectedDeviceConfig(), GetDisplayedInputConfig(GetPersistedInputConfig()));
             bool playerAssignmentsChanged = !PlayerAssignmentsMatch(GetEditedPlayerInputAssignment(), GetPersistedPlayerInputAssignment());
 
             return duplicateDeviceAssignmentChanged || configChanged || playerAssignmentsChanged;
-        }
-
-        private InputConfig GetPersistedComparisonConfig()
-        {
-            if (!IsDefaultProfileName(ProfileName) && TryLoadProfileConfiguration(ProfileName, out InputConfig profileConfig))
-            {
-                return profileConfig;
-            }
-
-            return GetDisplayedInputConfig(GetPersistedInputConfig());
         }
 
         private static bool ConfigsMatch(InputConfig currentConfig, InputConfig otherConfig)
@@ -2174,11 +2169,6 @@ namespace Ryujinx.Ava.UI.ViewModels.Input
                 return; //If the input settings were not touched, then do nothing
             }
 
-            // Don't persist profile changes when editing any profile (including Default)
-            // Profile changes should only be saved via SaveProfile button
-            // Player-level settings (Dynamic Input Swap, AllowDuplicateDeviceAssignment) should still be saved
-            bool isEditingProfile = !IsDefaultProfileName(ProfileName);
-
             IsModified = false;
 
             List<InputConfig> newConfig = [];
@@ -2215,13 +2205,9 @@ namespace Ryujinx.Ava.UI.ViewModels.Input
                 RemoveDuplicateDeviceAssignmentsForCurrentPlayer(newAssignments, assignment);
             }
 
-            // Don't save InputConfig when editing a profile - only save via SaveProfile button
-            // Only save InputConfig when editing Default profile (which is not a saved profile)
-            if (isEditingProfile)
-            {
-                // Skip InputConfig save - profile changes must be saved via SaveProfile button
-            }
-            else if (Device == 0)
+            // Apply the selected device and its configuration regardless of the selected profile.
+            // Profile files are written separately by SaveProfile.
+            if (Device == 0)
             {
                 newConfig.RemoveAll(inputConfig => inputConfig.PlayerIndex == PlayerId);
             }
