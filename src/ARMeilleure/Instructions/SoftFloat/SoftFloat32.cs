@@ -240,7 +240,7 @@ static class SoftFloat32
         [UnmanagedCallersOnly]
         public static float FPCompareLTFpscr(float value1, float value2, byte standardFpscr)
         {
-            return FPCompareGEFpscrImpl(value2, value1, standardFpscr == 1);
+            return FPCompareGTFpscrImpl(value2, value1, standardFpscr == 1);
         }
 
         [UnmanagedCallersOnly]
