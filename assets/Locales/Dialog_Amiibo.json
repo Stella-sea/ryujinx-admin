@@ -22,7 +22,7 @@
         "tr_TR": "",
         "uk_UA": "Виберіть BIN-файл для сканування Amiibo",
         "zh_CN": "",
-        "zh_TW": ""
+        "zh_TW": "選擇一個 BIN 檔案以掃瞄 Amiibo"
       }
     },
     {
@@ -122,7 +122,7 @@
         "tr_TR": "",
         "uk_UA": "Перейменувати Amiibo",
         "zh_CN": "",
-        "zh_TW": ""
+        "zh_TW": "重新命名 Amiibo"
       }
     },
 	  {
